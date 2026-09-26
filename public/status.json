@@ -1,0 +1,9 @@
+{
+  "alertActive": true,
+  "timestamp": 1790406924348,
+  "image": "/live-alert.jpg",
+  "meta": {
+    "imageSize": 43769,
+    "source": "ESP32-CAM"
+  }
+}

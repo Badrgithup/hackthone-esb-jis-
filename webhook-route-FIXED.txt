@@ -1,0 +1,123 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import fs from 'fs';
+import path from 'path';
+
+const client = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
+
+export async function POST(request: NextRequest) {
+  try {
+    // Parse request body - accept both raw text and JSON
+    let base64Data: string;
+    
+    const contentType = request.headers.get('content-type') || '';
+    
+    if (contentType.includes('application/json')) {
+      const json = await request.json();
+      base64Data = json.image;
+    } else {
+      // Raw text/plain base64
+      base64Data = await request.text();
+    }
+
+    if (!base64Data || base64Data.trim().length === 0) {
+      return NextResponse.json(
+        { error: 'No image data provided' },
+        { status: 400 }
+      );
+    }
+
+    console.log(`[Webhook] Received image data: ${base64Data.length} bytes`);
+
+    // ========== CRITICAL FIX: SAVE IMAGE FIRST ==========
+    // This ensures the ESP32 image is ALWAYS written to disk,
+    // even if Gemini fails or times out.
+    
+    const publicDir = path.join(process.cwd(), 'public');
+    if (!fs.existsSync(publicDir)) {
+      fs.mkdirSync(publicDir, { recursive: true });
+      console.log(`[Webhook] Created public directory`);
+    }
+
+    const imagePath = path.join(publicDir, 'live-alert.jpg');
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+    
+    fs.writeFileSync(imagePath, imageBuffer);
+    console.log(`[Webhook] ✅ Image saved: ${imagePath} (${imageBuffer.length} bytes)`);
+
+    // ========== ISOLATED GEMINI CALL ==========
+    // Wrap Gemini in its own try/catch so errors don't prevent image save.
+    
+    let responseText = 'INDETERMINÉ (ERREUR IA)';
+    let aiError: string | null = null;
+
+    try {
+      const model = client.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      
+      const prompt = `Look at this border camera feed. Is there a vehicle, car, truck, or 4x4 in this image? Answer with ONLY 'YES' or 'NO'.`;
+
+      const result = await model.generateContent([
+        prompt,
+        { 
+          inlineData: { 
+            data: base64Data, 
+            mimeType: 'image/jpeg' 
+          } 
+        }
+      ]);
+
+      responseText = result.response.text().trim().toUpperCase();
+      console.log(`[Webhook] ✅ Gemini response: ${responseText}`);
+
+    } catch (geminiErr: any) {
+      // Log the error but DON'T stop execution
+      aiError = geminiErr?.message || String(geminiErr);
+      console.warn(`[Webhook] ⚠️ Gemini evaluation error (image still saved):`, aiError);
+      // responseText already set to default 'INDETERMINÉ (ERREUR IA)'
+    }
+
+    // ========== ALWAYS WRITE STATUS ==========
+    // Status reflects the current state of the image on disk.
+    
+    const isVehicleDetected = responseText.includes('YES');
+    
+    const status = {
+      alertActive: isVehicleDetected,
+      timestamp: Date.now(),
+      image: '/live-alert.jpg',
+      decision: responseText,
+      meta: {
+        imageSize: imageBuffer.length,
+        aiError: aiError || null
+      }
+    };
+
+    const statusPath = path.join(publicDir, 'status.json');
+    fs.writeFileSync(statusPath, JSON.stringify(status, null, 2));
+    console.log(`[Webhook] ✅ Status written:`, status);
+
+    // ========== SUCCESS RESPONSE ==========
+    return NextResponse.json(
+      {
+        success: true,
+        message: 'Image processed',
+        imageUrl: status.image,
+        decision: responseText,
+        timestamp: status.timestamp,
+        aiWarning: aiError ? `Gemini had an issue but image was saved: ${aiError}` : null
+      },
+      { status: 200 }
+    );
+
+  } catch (error: any) {
+    console.error(`[Webhook] ❌ Critical error:`, error);
+    
+    return NextResponse.json(
+      {
+        error: 'Failed to process webhook',
+        details: error?.message || String(error)
+      },
+      { status: 500 }
+    );
+  }
+}

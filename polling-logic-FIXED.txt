@@ -1,0 +1,63 @@
+// Add this to your src/app/page.tsx in the useEffect that handles polling:
+
+useEffect(() => {
+  // FIXED: Initialize lastTimestamp to NOW, so we only react to NEW alerts
+  // (not stale alerts from previous sessions on disk)
+  let lastTimestamp = Date.now();
+  
+  const pollStatus = async () => {
+    try {
+      // Cache busting: add ?t=<timestamp> to force fresh response
+      const response = await fetch(`/status.json?t=${Date.now()}`);
+      
+      if (!response.ok) {
+        console.warn('[Poll] Status fetch failed:', response.status);
+        return;
+      }
+
+      const data = await response.json();
+      console.log('[Poll] Status:', data);
+
+      // CRITICAL: Only trigger alert if timestamp is NEWER than last seen
+      if (data.timestamp > lastTimestamp) {
+        lastTimestamp = data.timestamp;
+        
+        // New alert detected!
+        console.log('[Poll] 🚨 NEW ALERT at', new Date(data.timestamp).toISOString());
+        
+        setHasUnreadNotification(true);
+        setActiveAlert(true);
+        
+        // Update image URL with cache busting
+        setLiveImageUrl(`${data.image}?t=${data.timestamp}`);
+        
+        // Update AI classification
+        setAiClassification(data.decision || 'INDETERMINÉ');
+        
+        // Set the current node data
+        setCurrentNode({
+          id: 44,
+          name: 'Nœud #44 (ESB)',
+          status: 'ALERTE',
+          latitude: 36.899,
+          longitude: 10.189
+        });
+        
+        // Optional: Auto-clear alert after 30 seconds (customize as needed)
+        setTimeout(() => {
+          setActiveAlert(false);
+        }, 30000);
+      }
+      
+    } catch (error) {
+      console.error('[Poll] Error:', error);
+    }
+  };
+
+  // Start polling every 2 seconds
+  const interval = setInterval(pollStatus, 2000);
+  
+  // Cleanup on unmount
+  return () => clearInterval(interval);
+  
+}, []); // Empty dependency array: run once on mount
